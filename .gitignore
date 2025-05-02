@@ -1,2 +1,4 @@
 .env
 output/
+temp_embeddings/
+temp_graphs/

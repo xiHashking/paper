@@ -3,6 +3,9 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from openai_client import OpenAIClient
 import matplotlib
+import os
+import time
+from tqdm import tqdm
 matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS']  # 设置中文字体
 
 class KnowledgeGraph:
@@ -122,6 +125,47 @@ class KnowledgeGraph:
         
         return triplets
     
+    def chunk_text(self, text, chunk_size=5000, overlap=500):
+        """
+        将大型文本分割成较小的块
+        
+        参数:
+            text (str): 输入文本
+            chunk_size (int): 每个块的最大字符数
+            overlap (int): 块之间的重叠字符数，用于保持上下文连贯性
+            
+        返回:
+            list: 文本块列表
+        """
+        chunks = []
+        start = 0
+        text_length = len(text)
+        
+        while start < text_length:
+            end = min(start + chunk_size, text_length)
+            
+            # 如果不是最后一块，尝试找到句子边界来分割
+            if end < text_length:
+                # 在重叠区域内寻找句号、问号或感叹号作为分割点
+                boundary = end
+                search_end = min(end + overlap, text_length)
+                for i in range(end, search_end):
+                    if text[i] in ["。", "！", "？", ".", "!", "?"]:
+                        boundary = i + 1
+                        break
+                
+                chunk = text[start:boundary]
+                start = boundary - overlap  # 减去重叠部分，保持上下文连贯性
+            else:
+                # 最后一块
+                chunk = text[start:end]
+                start = end
+            
+            if chunk.strip():  # 确保块不是空的
+                chunks.append(chunk)
+        
+        return chunks
+    
     def build_from_text(self, text, method="spacy", keywords=None):
         """
         从文本构建知识图谱
@@ -143,6 +187,121 @@ class KnowledgeGraph:
             self.graph.add_node(obj)
             self.graph.add_edge(subject, obj, label=relation)
         
+        return self.graph
+    
+    def build_from_large_text(self, text, method="spacy", chunk_size=5000, overlap=500, 
+                              keywords=None, temp_save_path=None, merge_subgraphs=True):
+        """
+        从大型文本构建知识图谱，使用分块处理方法
+        
+        参数:
+            text (str): 输入文本
+            method (str): 提取方法，可选 "spacy" 或 "keywords"
+            chunk_size (int): 每个文本块的大小
+            overlap (int): 块之间的重叠字符数
+            keywords (list): 关键词列表，仅在method="keywords"时使用
+            temp_save_path (str): 临时保存路径，如果提供则每个块处理后保存子图
+            merge_subgraphs (bool): 是否合并所有子图，False则只保留最后一个子图
+            
+        返回:
+            nx.DiGraph: 构建的知识图谱
+        """
+        # 清空现有图谱
+        self.graph = nx.DiGraph()
+        
+        # 分割文本
+        chunks = self.chunk_text(text, chunk_size, overlap)
+        print(f"文本已分割为{len(chunks)}个块进行处理")
+        
+        # 存储所有子图
+        subgraphs = []
+        
+        # 处理每个文本块
+        for i, chunk in enumerate(tqdm(chunks, desc="处理文本块")):
+            # 创建一个临时图谱
+            temp_graph = nx.DiGraph()
+            
+            # 从当前块提取三元组
+            if method == "spacy":
+                triplets = self.extract_triplets_with_spacy(chunk)
+            elif method == "keywords":
+                triplets = self.extract_entities_with_keywords(chunk, keywords)
+            else:
+                raise ValueError("不支持的方法。请使用 'spacy' 或 'keywords'。")
+            
+            # 将三元组添加到临时图谱
+            for subject, relation, obj in triplets:
+                temp_graph.add_node(subject)
+                temp_graph.add_node(obj)
+                temp_graph.add_edge(subject, obj, label=relation)
+            
+            # 保存子图
+            subgraphs.append(temp_graph)
+            
+            # 如果提供了临时保存路径，保存当前子图
+            if temp_save_path:
+                os.makedirs(temp_save_path, exist_ok=True)
+                nx.write_gml(temp_graph, os.path.join(temp_save_path, f"subgraph_{i}.gml"))
+            
+            # 合并到主图或替换主图
+            if merge_subgraphs:
+                self.graph = nx.compose(self.graph, temp_graph)
+            else:
+                self.graph = temp_graph
+            
+            # 可选：给处理器一点休息时间，避免过度占用CPU
+            time.sleep(0.01)
+        
+        print(f"知识图谱构建完成，共有{self.graph.number_of_nodes()}个节点和{self.graph.number_of_edges()}条边")
+        return self.graph
+    
+    def load_from_subgraphs(self, subgraph_dir, merge_all=True):
+        """
+        从保存的子图文件加载知识图谱
+        
+        参数:
+            subgraph_dir (str): 子图文件目录
+            merge_all (bool): 是否合并所有子图，False则按最新的子图文件加载
+            
+        返回:
+            nx.DiGraph: 加载的知识图谱
+        """
+        # 清空现有图谱
+        self.graph = nx.DiGraph()
+        
+        # 获取目录中的所有GML文件
+        subgraph_files = [f for f in os.listdir(subgraph_dir) if f.endswith('.gml')]
+        
+        if not subgraph_files:
+            print(f"警告：在{subgraph_dir}中没有找到子图文件")
+            return self.graph
+        
+        # 按文件名排序（假设格式为 subgraph_{i}.gml）
+        subgraph_files.sort(key=lambda f: int(f.split('_')[1].split('.')[0]))
+        
+        print(f"找到{len(subgraph_files)}个子图文件")
+        
+        if merge_all:
+            # 加载并合并所有子图
+            for file_name in tqdm(subgraph_files, desc="加载子图"):
+                file_path = os.path.join(subgraph_dir, file_name)
+                try:
+                    subgraph = nx.read_gml(file_path)
+                    self.graph = nx.compose(self.graph, subgraph)
+                    #print(f"已加载并合并{file_name}")
+                except Exception as e:
+                    print(f"加载{file_name}失败: {e}")
+        else:
+            # 只加载最新的子图
+            latest_file = subgraph_files[-1]
+            file_path = os.path.join(subgraph_dir, latest_file)
+            try:
+                self.graph = nx.read_gml(file_path)
+                print(f"已加载最新子图{latest_file}")
+            except Exception as e:
+                print(f"加载{latest_file}失败: {e}")
+        
+        print(f"知识图谱加载完成，共有{self.graph.number_of_nodes()}个节点和{self.graph.number_of_edges()}条边")
         return self.graph
     
     def visualize(self, figsize=(12, 10), save_path=None):
@@ -210,8 +369,14 @@ if __name__ == "__main__":
         text = f.read()
     
     kg = KnowledgeGraph()
-    kg.build_from_text(text, method="spacy")
-    kg.visualize(save_path="knowledge_graph.png")
+    
+    # 测试标准方法
+    # kg.build_from_text(text, method="spacy")
+    
+    # 测试分块处理方法
+    kg.build_from_large_text(text, method="spacy", chunk_size=1000, overlap=200, 
+                            temp_save_path="temp_graphs")
+    kg.visualize(save_path="output/knowledge_graph.png")
     
     # 示例查询
     query = "深度学习与机器学习有什么关系？"

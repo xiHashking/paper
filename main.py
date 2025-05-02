@@ -282,6 +282,18 @@ def main():
     # 确保必要的目录存在
     ensure_directory_exists("data")
     ensure_directory_exists("output")
+    ensure_directory_exists("temp_graphs")
+    ensure_directory_exists("temp_embeddings")
+    
+    # 检查temp目录状态
+    has_kg_temp = os.path.exists("temp_graphs") and os.listdir("temp_graphs")
+    has_rag_temp = os.path.exists("temp_embeddings") and os.listdir("temp_embeddings")
+    
+    if has_kg_temp:
+        print("检测到已存在知识图谱临时文件 (temp_graphs)，将直接使用这些文件。")
+    
+    if has_rag_temp:
+        print("检测到已存在RAG系统临时文件 (temp_embeddings)，将直接使用这些文件。")
     
     print("欢迎使用增强型OpenAI问答系统！")
     print("="*50)
@@ -297,7 +309,7 @@ def main():
     
     # 读取示例文本
     try:
-        with open("data/sample_text.txt", "r", encoding="utf-8") as f:
+        with open("data/shout.txt", "r", encoding="utf-8") as f:
             sample_text = f.read()
         print("已读取示例文本文件。")
     except FileNotFoundError:
@@ -308,16 +320,22 @@ def main():
     print("\n构建知识图谱...")
     kg = KnowledgeGraph()
     if sample_text:
-        # 使用spaCy方法构建知识图谱，不依赖OpenAI API
-        kg.build_from_text(sample_text, method="spacy")
-        kg.visualize(save_path="output/knowledge_graph.png")
-        print("知识图谱已构建并保存到output/knowledge_graph.png")
+        if has_kg_temp:
+            # 从现有子图文件加载知识图谱
+            try:
+                kg.load_from_subgraphs("temp_graphs", merge_all=True)
+                print("知识图谱已从现有子图文件加载完成。")
+            except Exception as e:
+                print(f"从子图加载失败：{e}，将重新构建...")
+                kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs")
+        else:
+            # 从头构建知识图谱
+            print("从头构建知识图谱...")
+            kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs")
         
-        # 额外使用关键词方法构建知识图谱
-        kg_keywords = KnowledgeGraph()
-        kg_keywords.build_from_text(sample_text, method="keywords")
-        kg_keywords.visualize(save_path="output/knowledge_graph_keywords.png")
-        print("关键词知识图谱已构建并保存到output/knowledge_graph_keywords.png")
+        # 无论如何都重新可视化，确保图像是最新的
+        kg.visualize(save_path="output/knowledge_graph.png")
+        print("知识图谱已可视化并保存到output/knowledge_graph.png")
     else:
         print("无法构建知识图谱：没有文本数据。")
     
@@ -327,10 +345,27 @@ def main():
         rag = RAGSystem()
         
         if sample_text:
-            rag.add_document(sample_text, metadata={"source": "示例文本"})
-            # 构建索引
-            rag.build_index()
-            print("RAG系统已成功构建。")
+            if has_rag_temp:
+                # 从现有文件加载RAG索引
+                try:
+                    index_path = "temp_embeddings/faiss_index.bin"
+                    doc_map_path = "temp_embeddings/document_map.pkl"
+                    if os.path.exists(index_path) and os.path.exists(doc_map_path):
+                        rag.load_index_from_files(index_path, doc_map_path)
+                        print("RAG系统已从现有索引文件加载完成。")
+                    else:
+                        raise FileNotFoundError("找不到必要的索引文件")
+                except Exception as e:
+                    print(f"加载现有索引失败：{e}，将重新构建...")
+                    rag.add_document(sample_text, metadata={"source": "示例文本"})
+                    rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings")
+            else:
+                # 从头构建RAG索引
+                print("从头构建RAG索引...")
+                rag.add_document(sample_text, metadata={"source": "示例文本"})
+                rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings")
+            
+            print("RAG系统已准备就绪。")
         else:
             print("无法构建RAG系统：没有文本数据。")
     except Exception as e:

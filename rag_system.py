@@ -3,6 +3,9 @@ import numpy as np
 import faiss
 from openai_client import OpenAIClient
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from tqdm import tqdm
+import time
+import pickle
 
 class RAGSystem:
     def __init__(self):
@@ -53,30 +56,155 @@ class RAGSystem:
                     
                     self.add_document(content, metadata={"source": file_path})
     
-    def build_index(self):
-        """构建向量索引"""
+    def chunk_documents(self, batch_size=100):
+        """
+        将文档分成批次处理
+        
+        参数:
+            batch_size (int): 每批处理的文档数量
+            
+        返回:
+            list: 文档批次列表
+        """
+        batches = []
+        for i in range(0, len(self.documents), batch_size):
+            batch = self.documents[i:min(i + batch_size, len(self.documents))]
+            batches.append(batch)
+        return batches
+    
+    def build_index_in_batches(self, batch_size=100, temp_dir=None):
+        """
+        分批构建向量索引，适用于大型文档集合
+        
+        参数:
+            batch_size (int): 每批处理的文档数量
+            temp_dir (str): 临时文件保存目录，如果为None则不保存临时文件
+        """
         if not self.documents:
             print("没有文档，无法构建索引")
             return
         
-        # 为每个文档生成嵌入向量
-        self.embeddings = []
-        for doc in self.documents:
-            embedding = self.openai_client.embeddings(doc["text"])
-            if embedding:
-                self.embeddings.append(embedding)
-            else:
-                print(f"警告: 无法为文档生成嵌入向量: {doc['text'][:50]}...")
+        # 创建临时目录
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+            print(f"临时文件将保存在: {temp_dir}")
         
+        # 分批获取文档
+        batches = self.chunk_documents(batch_size)
+        print(f"文档已分成{len(batches)}个批次进行处理，每批{batch_size}个文档")
+        
+        # 跟踪文档索引映射
+        doc_indices = {}
+        all_embeddings = []
+        
+        # 逐批处理文档
+        for batch_idx, batch in enumerate(tqdm(batches, desc="处理文档批次")):
+            print(f"\n处理第{batch_idx+1}/{len(batches)}批文档...")
+            batch_embeddings = []
+            
+            # 处理批次中的每个文档
+            for doc_idx, doc in enumerate(tqdm(batch, desc=f"批次{batch_idx+1}中的文档")):
+                global_idx = batch_idx * batch_size + doc_idx
+                doc_indices[global_idx] = doc
+                
+                # 生成嵌入向量
+                embedding = self.openai_client.embeddings(doc["text"])
+                if embedding:
+                    batch_embeddings.append(embedding)
+                    all_embeddings.append(embedding)
+                else:
+                    print(f"警告: 无法为文档生成嵌入向量: {doc['text'][:30]}...")
+                
+                # 避免API限制
+                time.sleep(0.1)
+            
+            # 保存批次结果
+            if temp_dir:
+                # 保存批次嵌入向量
+                with open(os.path.join(temp_dir, f"embeddings_batch_{batch_idx}.pkl"), "wb") as f:
+                    pickle.dump(batch_embeddings, f)
+                
+                # 保存批次文档索引
+                batch_indices = {global_idx: doc for global_idx, doc in doc_indices.items() 
+                               if batch_idx * batch_size <= global_idx < (batch_idx + 1) * batch_size}
+                with open(os.path.join(temp_dir, f"docs_batch_{batch_idx}.pkl"), "wb") as f:
+                    pickle.dump(batch_indices, f)
+        
+        # 存储最终的嵌入向量
+        self.embeddings = all_embeddings
+        
+        # 如果没有嵌入向量，返回
         if not self.embeddings:
             print("没有可用的嵌入向量，无法构建索引")
             return
         
-        # 创建FAISS索引
+        # 创建并构建FAISS索引
+        print("构建FAISS索引...")
         dim = len(self.embeddings[0])
         self.index = faiss.IndexFlatL2(dim)
         self.index.add(np.array(self.embeddings, dtype=np.float32))
+        
+        # 保存最终索引
+        if temp_dir:
+            faiss.write_index(self.index, os.path.join(temp_dir, "faiss_index.bin"))
+            with open(os.path.join(temp_dir, "document_map.pkl"), "wb") as f:
+                pickle.dump(doc_indices, f)
+        
         print(f"索引已构建，包含 {len(self.embeddings)} 个文档嵌入向量")
+    
+    def load_index_from_files(self, index_path, doc_map_path):
+        """
+        从文件加载索引和文档映射
+        
+        参数:
+            index_path (str): FAISS索引文件路径
+            doc_map_path (str): 文档映射文件路径
+        """
+        # 加载FAISS索引
+        self.index = faiss.read_index(index_path)
+        print(f"已加载FAISS索引，包含 {self.index.ntotal} 个向量")
+        
+        # 加载文档映射
+        with open(doc_map_path, "rb") as f:
+            doc_map = pickle.load(f)
+        
+        # 重建文档列表
+        self.documents = [doc for _, doc in sorted(doc_map.items())]
+        
+        # 初始化embeddings数组，确保长度与索引中的向量数量一致
+        # 实际的嵌入向量存储在FAISS索引中
+        self.embeddings = [None] * self.index.ntotal
+        
+        print(f"已加载 {len(self.documents)} 个文档")
+    
+    def build_index(self, batch_mode=False, batch_size=100, temp_dir=None):
+        """构建向量索引，支持批处理模式"""
+        if batch_mode:
+            self.build_index_in_batches(batch_size, temp_dir)
+        else:
+            # 原有的build_index方法
+            if not self.documents:
+                print("没有文档，无法构建索引")
+                return
+            
+            # 为每个文档生成嵌入向量
+            self.embeddings = []
+            for doc in tqdm(self.documents, desc="生成嵌入向量"):
+                embedding = self.openai_client.embeddings(doc["text"])
+                if embedding:
+                    self.embeddings.append(embedding)
+                else:
+                    print(f"警告: 无法为文档生成嵌入向量: {doc['text'][:50]}...")
+            
+            if not self.embeddings:
+                print("没有可用的嵌入向量，无法构建索引")
+                return
+            
+            # 创建FAISS索引
+            dim = len(self.embeddings[0])
+            self.index = faiss.IndexFlatL2(dim)
+            self.index.add(np.array(self.embeddings, dtype=np.float32))
+            print(f"索引已构建，包含 {len(self.embeddings)} 个文档嵌入向量")
     
     def search(self, query, top_k=3):
         """
@@ -99,10 +227,18 @@ class RAGSystem:
             print("无法为查询生成嵌入向量")
             return []
         
+        # 确保top_k是有效的
+        if top_k <= 0:
+            print("警告: top_k必须大于0，使用默认值3")
+            top_k = 3
+        
+        # 计算可搜索的文档数量 - 使用索引中的向量数量
+        max_docs = min(top_k, self.index.ntotal)
+        
         # 搜索最相似的文档
         distances, indices = self.index.search(
             np.array([query_embedding], dtype=np.float32),
-            min(top_k, len(self.embeddings))
+            max_docs
         )
         
         # 返回相关文档
@@ -165,8 +301,8 @@ if __name__ == "__main__":
     # 添加示例文档
     rag.add_documents_from_directory("data")
     
-    # 构建索引
-    rag.build_index()
+    # 使用批处理模式构建索引
+    rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings")
     
     # 测试问答
     question = "深度学习与机器学习的关系是什么？"

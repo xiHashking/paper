@@ -13,7 +13,7 @@ class OpenAIClient:
             raise ValueError("未找到OpenAI API密钥。请在.env文件中设置OPENAI_API_KEY环境变量。")
         self.client = OpenAI(api_key=self.api_key)
     
-    def chat_completion(self, messages, model="gpt-3.5-turbo", temperature=0.7):
+    def chat_completion(self, messages, model="gpt-4-1106-preview", temperature=0.7):
         """
         使用OpenAI的Chat Completion API
         

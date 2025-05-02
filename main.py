@@ -284,10 +284,18 @@ def main():
     ensure_directory_exists("output")
     ensure_directory_exists("temp_graphs")
     ensure_directory_exists("temp_embeddings")
-    
+        # 读取示例文本
+    file_name = "tengye"
+    try:
+        with open("data/"+file_name+".txt", "r", encoding="utf-8") as f:
+            sample_text = f.read()
+        print("已读取示例文本文件。")
+    except FileNotFoundError:
+        print("警告：找不到示例文本文件，将使用空文本。")
+        sample_text = ""
     # 检查temp目录状态
-    has_kg_temp = os.path.exists("temp_graphs") and os.listdir("temp_graphs")
-    has_rag_temp = os.path.exists("temp_embeddings") and os.listdir("temp_embeddings")
+    has_kg_temp = os.path.exists("temp_graphs/"+file_name) and os.listdir("temp_graphs/"+file_name)
+    has_rag_temp = os.path.exists("temp_embeddings/"+file_name) and os.listdir("temp_embeddings/"+file_name)
     
     if has_kg_temp:
         print("检测到已存在知识图谱临时文件 (temp_graphs)，将直接使用这些文件。")
@@ -307,14 +315,7 @@ def main():
         print("请在.env文件中设置正确的API密钥后重试。")
         return
     
-    # 读取示例文本
-    try:
-        with open("data/shout.txt", "r", encoding="utf-8") as f:
-            sample_text = f.read()
-        print("已读取示例文本文件。")
-    except FileNotFoundError:
-        print("警告：找不到示例文本文件，将使用空文本。")
-        sample_text = ""
+
     
     # 初始化并构建知识图谱
     print("\n构建知识图谱...")
@@ -323,19 +324,21 @@ def main():
         if has_kg_temp:
             # 从现有子图文件加载知识图谱
             try:
-                kg.load_from_subgraphs("temp_graphs", merge_all=True)
+                kg.load_from_subgraphs("temp_graphs/"+file_name, merge_all=True)
                 print("知识图谱已从现有子图文件加载完成。")
             except Exception as e:
                 print(f"从子图加载失败：{e}，将重新构建...")
-                kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs")
+                kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs/"+file_name)
         else:
             # 从头构建知识图谱
             print("从头构建知识图谱...")
-            kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs")
-        
+            kg.build_from_large_text(sample_text, method="spacy", chunk_size=1000, overlap=200, temp_save_path="temp_graphs/"+file_name)
+        #如果q不存在就创建路径
+        if not os.path.exists("output/"+file_name):
+            os.makedirs("output/"+file_name)
         # 无论如何都重新可视化，确保图像是最新的
-        kg.visualize(save_path="output/knowledge_graph.png")
-        print("知识图谱已可视化并保存到output/knowledge_graph.png")
+        kg.visualize(save_path=f"output/{file_name}/knowledge_graph.png")
+        print(f"知识图谱已可视化并保存到output/{file_name}/knowledge_graph.png")
     else:
         print("无法构建知识图谱：没有文本数据。")
     
@@ -348,8 +351,8 @@ def main():
             if has_rag_temp:
                 # 从现有文件加载RAG索引
                 try:
-                    index_path = "temp_embeddings/faiss_index.bin"
-                    doc_map_path = "temp_embeddings/document_map.pkl"
+                    index_path = "temp_embeddings/"+file_name+"/faiss_index.bin"
+                    doc_map_path = "temp_embeddings/"+file_name+"/document_map.pkl"
                     if os.path.exists(index_path) and os.path.exists(doc_map_path):
                         rag.load_index_from_files(index_path, doc_map_path)
                         print("RAG系统已从现有索引文件加载完成。")
@@ -358,12 +361,12 @@ def main():
                 except Exception as e:
                     print(f"加载现有索引失败：{e}，将重新构建...")
                     rag.add_document(sample_text, metadata={"source": "示例文本"})
-                    rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings")
+                    rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings/"+file_name)
             else:
                 # 从头构建RAG索引
                 print("从头构建RAG索引...")
                 rag.add_document(sample_text, metadata={"source": "示例文本"})
-                rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings")
+                rag.build_index(batch_mode=True, batch_size=50, temp_dir="temp_embeddings/"+file_name)
             
             print("RAG系统已准备就绪。")
         else:
